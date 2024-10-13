@@ -1,6 +1,6 @@
 import json
 import re
-from ollama import Ollama
+from ollama_service import Ollama
 llm_service = Ollama(system_prompt="", format=None)
 # llm_service.tokens()
 
