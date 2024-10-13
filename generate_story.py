@@ -1,27 +1,12 @@
 import json
 import re
-import os
-from groq import Groq
-import time
+from ollama import Ollama
+llm_service = Ollama(system_prompt="", format=None)
+# llm_service.tokens()
+
 
 # --------------------------
 # This is a story generator
-
-
-# --------------------------
-# Use Groq for the llm 
-model=f"llama3-8b-8192"
-client = Groq( api_key=os.environ.get("GROQ_API_KEY") )
-def call_llm(user_text, temperature=0.0):
-    # sleep for 1 second to avoid rate limiting
-    time.sleep(10)
-    chat_completion = client.chat.completions.create(
-        messages=[{"role": "user", "content": user_text}],
-        model=model,
-        temperature=temperature
-    )
-    result = chat_completion.choices[0].message.content
-    return result
 
 
 
@@ -32,7 +17,7 @@ def call_llm(user_text, temperature=0.0):
 client_objective = """- Genre: Isekai Humour
 - Target audience: young adult
 - Target number of chapters: 5
-- Target length of each chapter: 2000 words
+- Target length of each chapter: 5000 words
 - Time period: Cave man era
 - Setting: Earth
 - Sensitivity: must be safe for work"""
@@ -75,7 +60,7 @@ def do_task(task, agents, client_objective, task_output):
         # it is the facilitator.  They check if we are done or if we need to proceed
         if attendee == task['attendees'][0]:
             agent_prompt = "\n\n".join([*agent_prompt, f"[{agent['title']}] " + f"Am I ready to define the {task['output']} of the story and it meets all the assignment constraints (yes or no)?"])
-            agent_response = call_llm(agent_prompt, agent['temperature'])
+            agent_response = llm_service.process(agent_prompt, agent['temperature'])
             if 'yes' in agent_response.lower():
                 break
             else:
@@ -89,7 +74,7 @@ def do_task(task, agents, client_objective, task_output):
 
             no_end_found = True
             while no_end_found and len(agent_response.split(" ")) < target_word_count * 1.25:
-                sub_response = call_llm(agent_prompt + agent_response, agent['temperature'])
+                sub_response = llm_service.process(agent_prompt + agent_response, agent['temperature'])
                 if 'END ' in sub_response:
                     print("-"*10, "Found END", "-"*10)
                     agent_response += sub_response.split("END ")[0]
@@ -111,7 +96,7 @@ def do_task(task, agents, client_objective, task_output):
         agent_prompt = [agent['description'], meeting, "The attendees are:", *other_attendees, *transcript]
 
         agent_prompt = "\n\n".join([*agent_prompt,finalize_task])
-        agent_response = call_llm(agent_prompt, agent['temperature'])
+        agent_response = llm_service.process(agent_prompt, agent['temperature'])
 
         transcript.append(f"[{agent['title']}] " + finalize_task + agent_response)
         print(agent_response)
@@ -231,12 +216,11 @@ def format_task_output(task_output):
 
 def create_copy_of_tasks(index, chapters):
     copy_task_output = dict(task_output)
-    if index >= 1:
-        for i in range(0, index-1):
+    if index > 10:
+        for i in range(0, index-10):
             if chapters[i] in copy_task_output:
                 del copy_task_output[chapters[i]]
-    if index >= 5:
-        for i in range(0,index-5):
+        for i in range(index-10,index):
             if f"summary of {chapters[i]}" in copy_task_output:
                 del copy_task_output[f"summary of {chapters[i]}"]
     return copy_task_output
