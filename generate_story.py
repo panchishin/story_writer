@@ -1,0 +1,320 @@
+import json
+import re
+import os
+from groq import Groq
+import time
+
+# --------------------------
+# This is a story generator
+
+
+# --------------------------
+# Use Groq for the llm 
+model=f"llama3-8b-8192"
+client = Groq( api_key=os.environ.get("GROQ_API_KEY") )
+def call_llm(user_text, temperature=0.0):
+    # sleep for 1 second to avoid rate limiting
+    time.sleep(10)
+    chat_completion = client.chat.completions.create(
+        messages=[{"role": "user", "content": user_text}],
+        model=model,
+        temperature=temperature
+    )
+    result = chat_completion.choices[0].message.content
+    return result
+
+
+
+# --------------------------
+# This is the objective of the story.  It is used to help guide the story creation process.
+# The whole point is to create a coherent story that meets the objective, beyond the 4K token limit that most LLMs have.
+
+client_objective = """- Genre: Isekai Humour
+- Target audience: young adult
+- Target number of chapters: 5
+- Target length of each chapter: 2000 words
+- Time period: Cave man era
+- Setting: Earth
+- Sensitivity: must be safe for work"""
+
+
+# --------------------------
+# Global variable to track all communication during the story generation process
+
+all_transcripts = []
+
+
+
+
+# --------------------------
+# This function is called to perform a task.  It is called for each task in the story.
+
+def do_task(task, agents, client_objective, task_output):
+    name = task['name']
+    output = task['output']
+    print("="*10,name,"="*10)
+
+    target_word_count = 1 if '(' not in name else int(name.split("(")[1].split(' ')[0])
+
+    meeting = f"I am in a meeting named: {task['name']}"
+
+    agent = agents[task['attendees'][0]]
+    initial_agent_direction = task.get("initial_agent_direction",f"[{agent['title']}] The objective for is meeting is to define the {task['output']} of the story.")
+
+    transcript = ["We all know the writing assignments constraints are:",
+                  client_objective,
+                  format_task_output(task_output), initial_agent_direction
+                  ]
+    all_transcripts.append(transcript)
+
+    attendees = task['attendees'][1:] # + task['attendees'] if task.get("loop",True) else task['attendees'][1:]
+    for attendee in attendees:
+        agent = agents[attendee]
+        other_attendees = [f"[{agents[attendee]['title']}] Hi, {agents[attendee]['description']}" for attendee in task['attendees'] if attendee != agent['title']]
+        agent_prompt = [agent['description'], meeting, "The attendees are:", *other_attendees, *transcript]
+        # it is the facilitator.  They check if we are done or if we need to proceed
+        if attendee == task['attendees'][0]:
+            agent_prompt = "\n\n".join([*agent_prompt, f"[{agent['title']}] " + f"Am I ready to define the {task['output']} of the story and it meets all the assignment constraints (yes or no)?"])
+            agent_response = call_llm(agent_prompt, agent['temperature'])
+            if 'yes' in agent_response.lower():
+                break
+            else:
+                transcript.append(f"[{agent['title']}] We need to agree on the {task['output']} of the story.  Let's move towards agreeing on one that aligns with the assignment constraints.")
+
+        else:
+            print("-"*10, agent['title'], "-"*10)
+            agent_prompt = "\n\n".join([*agent_prompt, f"[{agent['title']}] " + task.get("agent_prompt","Although I may have a lot to say, I'll keep my response to at most a few sentences.  My response is:\n")])
+
+            agent_response = ""
+
+            no_end_found = True
+            while no_end_found and len(agent_response.split(" ")) < target_word_count * 1.25:
+                sub_response = call_llm(agent_prompt + agent_response, agent['temperature'])
+                if 'END ' in sub_response:
+                    print("-"*10, "Found END", "-"*10)
+                    agent_response += sub_response.split("END ")[0]
+                    no_end_found = False
+                    break
+                else:
+                    agent_response += sub_response
+
+            transcript.append(f"[{agent['title']}] {agent_response}")
+            print(agent_response)
+
+    if task.get("loop",True):
+        finalize_task = task.get("finalize_task",f"Without adding commentary, I will note for my records that from the above conversation the {task['output']} of the story.  This will be the only record so I will pay close attention to preserving all related important information:\n")
+
+        agent = agents[task['attendees'][0]]
+        print("-"*10, agent['title'], "-"*10)
+
+        other_attendees = [f"[{agents[attendee]['title']}] Hi, {agents[attendee]['description']}" for attendee in task['attendees'] if attendee != agent]
+        agent_prompt = [agent['description'], meeting, "The attendees are:", *other_attendees, *transcript]
+
+        agent_prompt = "\n\n".join([*agent_prompt,finalize_task])
+        agent_response = call_llm(agent_prompt, agent['temperature'])
+
+        transcript.append(f"[{agent['title']}] " + finalize_task + agent_response)
+        print(agent_response)
+
+    task_output[output] = agent_response
+    print("")
+
+
+
+# --------------------------
+# This function is called to create agents.  Each agent has a different personality and role in meetings
+
+def create_agents():
+    agents = [
+        {"title":"CEO", 
+         "description":"""I am the CEO of ChatWriter.
+My main responsibilities include being an active decision maker on user demands and other key policy issues, leader, manager, and executor. 
+My decision-making role involves high-level decisions about policy and strategy;
+and my communicator role can involve speaking to the organization's management and employees.""",
+    "temperature":0.01},
+        {"title":"Artistic Director",
+         "description" : """I am the Artistic Director of ChatWriter.  I am very familiar with story writing.
+I will make high-level decisions for the overarching story that closely aligh with the organiation's goals,
+while I work alongside the organizations writing staff members to perform everyday operations.""",
+    "temperature":1.0},
+        {"title":"Professional Writer",
+         "description": """I am a Professional Writer of ChatWriter.
+I can write and create coherent interesting and engaging stories where characters seem to come to life.
+I have extensive writing experience and understand that characters in my writing should not be omniscient or flawless,
+and indeed the interesting story plays on the characters flaws and lack of knowledge.""",
+    "temperature":0.5},
+        {"title":"Editor",
+         "description": """I am an Editor of ChatWriter.
+I can help writers to assess their writing quality and give feedback on pacing, continuity, focus, development, coherence, 
+logical errors, grammatical errors, overused cliches, and offer proposals to improve their writing.""",
+    "temperature":0.2}
+    ]
+
+    # convert to dictionary by title
+    agents = dict( (a['title'], a) for a in agents)
+    return agents
+
+agents = create_agents()
+
+
+# --------------------------
+# This function is called to create the initial tasks, such as creating the plot, characters, and setting
+# New tasks can be added during the story creation process, and specifically the task of writing each chapter
+# is added after the outline is created.  Tasks are completed by having "meetings" with the agents.
+
+def create_initial_tasks():
+    tasks = [
+        {
+            "name" : "Brainstorming the story plot",
+            "attendees" : ["CEO", "Artistic Director", "Professional Writer"],
+            "output" : "Plot"
+        }
+    ]
+
+    for part in "Characters with names with descriptions, Conflict, Setting".split(", "):
+        tasks.append({
+            "name" : f"Brainstorming the story line {part}",
+            "attendees" : ["CEO", "Artistic Director", "Professional Writer"],
+            "output" : part
+        })
+
+    for part in "Exposition, Climax, Resolution".split(", "):
+        tasks.append({
+            "name" : f"Brainstorming the plot {part}",
+            "attendees" : ["CEO", "Artistic Director", "Professional Writer"],
+            "output" : part
+        })
+
+    tasks.append({
+        "name" : "Chapter outline",
+        "attendees" : ["Editor", "Professional Writer"],
+        "output" : "chapter outline with estimated words per chapter",
+        "agent_prompt" : "My response is:\n",
+        "finalize_task" : """From the above conversation I believe we can define the chapter outline with estimated words per chapter.
+In order to help keep the format of the outline consistent I will rewrite it to follow a format that mimics this example
+
+Example start
+Chapter 1: Our hero meets receives a letter (400 words)
+Chapter 2: A surprise visit during the grand feast (350 words)
+Chapter 3: The Empress is none too please with how the feast is going (600 words)
+Chapter 4: The Fool is the fool but isn't fooled (800 words)
+Example end
+
+The chapter outline with estimated words per chapter is:\n"""
+    })
+    return tasks
+
+tasks = create_initial_tasks()
+
+
+
+# --------------------------
+# The output from each meeting is stored in this dictionary.
+# Each agent has the ENTIRE contents pasted at the to of each meeting they attend so they can reference it.
+# By the end of the story creation process it will have the plot, characters, setting, and chapter outline
+# with estimated words per chapter, chapter summaries, and the chapters themselves.  Everything that was generated from a meeting
+
+task_output = {}
+
+
+
+# --------------------------
+# The rest of these function are focused on running the meetings to complete the tasks,
+# formatting output, and scheduling the agents participation in the meetings
+
+def format_task_output(task_output):
+    if len(task_output) > 0:
+        return "We all know that our creative process has produced this so far:\n" + "\n".join([f"- {key}: {value}" for (key,value) in task_output.items()])
+    else:
+        return ""
+
+
+def create_copy_of_tasks(index, chapters):
+    copy_task_output = dict(task_output)
+    if index >= 1:
+        for i in range(0, index-1):
+            if chapters[i] in copy_task_output:
+                del copy_task_output[chapters[i]]
+    if index >= 5:
+        for i in range(0,index-5):
+            if f"summary of {chapters[i]}" in copy_task_output:
+                del copy_task_output[f"summary of {chapters[i]}"]
+    return copy_task_output
+
+def process_chapter(index, chapters):
+    chapter = chapters[index]
+    task = {
+        "name" : f"Write {chapter}",
+        "attendees" : ["CEO", "Professional Writer"],
+        "output" : chapter,
+        "initial_agent_direction" : f"""[CEO] The objective for this meeting is to write '{chapter}'.
+Please write this chapter in its entirety.    When I am done the summary I'll write the exact phrase 'END CHAPTER'.  Use an active voice, write in the first person from the main characters point of view, and put conversation in quotes.""",
+        "agent_prompt" : f"I'll start right now.  My response is:\n\n{chapter}\n\nBEGIN CHAPTER\n",
+        "loop" : False
+    }
+    tasks.append(task)
+
+    copy_task_output = create_copy_of_tasks(index, chapters)
+
+    do_task(task, agents, client_objective, copy_task_output)
+    # using copy task output, so copy the chapter to the task output
+    task_output[chapter] = copy_task_output[chapter]
+
+
+def process_summary(index, chapters):
+    chapter = chapters[index]
+    summary_of_chapter = f"summary of {chapter}"
+    task = {
+        "name" : f"Summarize {chapter}",
+        "attendees" : ["CEO", "Professional Writer"],
+        "output" : summary_of_chapter,
+        "loop" : False,
+        "initial_agent_direction" : f"""[CEO] The objective for this meeting is to summarize '{chapter}'.
+Please write a short summary of this chapter so that we can quickly reference the import points without having to re-read the entire thing.""",
+        "agent_prompt" : "I'll start right now.  When I am done the summary I'll write the exact phrase 'END SUMMARY'.  My response is:\n\nShort summary of {chapter}\n\nBEGIN SUMMARY\n",
+    }
+    tasks.append(task)
+
+    copy_task_output = create_copy_of_tasks(index, chapters)
+
+    do_task(task, agents, client_objective, copy_task_output)
+    # using copy task output, so copy the chapter to the task output
+    task_output[summary_of_chapter] = copy_task_output[summary_of_chapter]
+
+
+chapters = []
+def generate_content():
+
+    for task in tasks:
+        yield do_task(task, agents, client_objective, task_output)
+
+    chapters.extend(task_output["chapter outline with estimated words per chapter"].split('\n'))
+
+    for index in range(len(chapters)):
+        if 'Chapter ' in chapters[index] and ' words)' in chapters[index]:
+            yield process_chapter(index, chapters)
+            yield process_summary(index, chapters)
+
+
+
+
+# --------------------------
+# And FINALLY generate all the output!
+
+content = generate_content()
+for item in content:
+    pass
+
+# --------------------------
+# And write the story to a file
+
+with open("story.txt", "w") as file:
+    for chapter in chapters:
+      file.write( "\n\n-- " + re.sub('\\(.*','',chapter) + " --\n\n" )
+      file.write( task_output[chapter] )
+
+# --------------------------
+# And write all communication to and between agents to a debug file
+
+with open("story.json","w") as file:
+   json.dump({'transcript':all_transcripts, 'creative':task_output}, file, indent=4)
